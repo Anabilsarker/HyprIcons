@@ -15,15 +15,15 @@ use relm4::gtk::{gdk, gio, glib};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::fmt;
 
-use config::{config_file, load_settings, save_settings, Overrides, Settings};
+use config::{Overrides, Settings, config_file, load_settings, save_settings};
 use desktop_icon_view::Callbacks;
 use desktop_window::DesktopWindow;
 use watcher::FileWatcher;
 
-const APP_ID: &str = "org.example.DesktopForHypr";
+const APP_ID: &str = "HyprIcons";
 
 // ---------------------------------------------------------------------------
 // gtk4-layer-shell must be loaded before libwayland-client. Re-exec with
@@ -79,11 +79,7 @@ fn ensure_layer_shell_preloaded() {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "hypricons",
-    version,
-    about = "Desktop icons for Hyprland"
-)]
+#[command(name = "hypricons", version, about = "Desktop icons for Hyprland")]
 struct Args {
     /// Config file path
     #[arg(long)]
@@ -150,10 +146,6 @@ fn setup_logging(debug: bool) {
         .without_time()
         .init();
 }
-
-// ---------------------------------------------------------------------------
-// Application — port of main.py::Application
-// ---------------------------------------------------------------------------
 
 const CSS: &str = "
 window, scrolledwindow, viewport, flowbox, flowboxchild {
@@ -308,7 +300,10 @@ impl App {
         info!("Monitors: {}", monitors.len());
         for (i, m) in monitors.iter().enumerate() {
             let r = m.geometry();
-            let model = m.model().map(|s| s.to_string()).unwrap_or_else(|| "unknown".into());
+            let model = m
+                .model()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".into());
             info!(
                 "  [{}] {}: {}x{}+{}+{}",
                 i,
@@ -364,22 +359,23 @@ impl App {
 
         let desktop_path = self.settings.borrow().desktop_path.clone();
         if Path::new(&desktop_path).exists()
-            && let Ok(rd) = std::fs::read_dir(&desktop_path) {
-                let files: Vec<String> = rd
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect();
-                info!(
-                    "Desktop {}: {} files",
-                    if screen_name.is_empty() {
-                        screen_num.to_string()
-                    } else {
-                        screen_name.to_string()
-                    },
-                    files.len()
-                );
-                w.update_icons(&files, &desktop_path);
-            }
+            && let Ok(rd) = std::fs::read_dir(&desktop_path)
+        {
+            let files: Vec<String> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            info!(
+                "Desktop {}: {} files",
+                if screen_name.is_empty() {
+                    screen_num.to_string()
+                } else {
+                    screen_name.to_string()
+                },
+                files.len()
+            );
+            w.update_icons(&files, &desktop_path);
+        }
         w
     }
 
@@ -477,7 +473,7 @@ fn main() {
     setup_logging(settings.debug);
 
     info!(
-        "desktop-for-hypr starting (GTK {}.{}.{})",
+        "HyprIcons starting (GTK {}.{}.{})",
         gtk::major_version(),
         gtk::minor_version(),
         gtk::micro_version()
@@ -497,5 +493,9 @@ fn main() {
     gtk::init().expect("failed to init GTK");
     let app = App::new(settings);
     let code = app.run();
-    std::process::exit(if code == glib::ExitCode::SUCCESS { 0 } else { 1 });
+    std::process::exit(if code == glib::ExitCode::SUCCESS {
+        0
+    } else {
+        1
+    });
 }

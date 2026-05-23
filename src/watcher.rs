@@ -1,5 +1,3 @@
-//! Port of Python src/watcher.py — debounced directory watcher via Gio.FileMonitor.
-
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -43,10 +41,9 @@ impl FileWatcher {
             return false;
         }
         let file = gio::File::for_path(&self.path);
-        let monitor = match file.monitor_directory(
-            gio::FileMonitorFlags::WATCH_MOVES,
-            gio::Cancellable::NONE,
-        ) {
+        let monitor = match file
+            .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+        {
             Ok(m) => m,
             Err(e) => {
                 error!("Failed to start monitor on {}: {}", self.path.display(), e);
@@ -83,7 +80,10 @@ impl FileWatcher {
             _ => "changed",
         };
         debug!("FS event: {} → {}", event_name, filename);
-        self.inner.pending.borrow_mut().insert(event_name.to_string());
+        self.inner
+            .pending
+            .borrow_mut()
+            .insert(event_name.to_string());
 
         if let Some(src) = self.inner.debounce.borrow_mut().take() {
             src.remove();

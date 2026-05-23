@@ -7,7 +7,7 @@ pub fn config_dir() -> PathBuf {
     dirs::home_dir()
         .expect("no home dir")
         .join(".config")
-        .join("desktop-for-hypr")
+        .join("hypricons")
 }
 
 pub fn config_file() -> PathBuf {
@@ -20,9 +20,10 @@ fn expand_user(p: &str) -> String {
             return home.join(rest).to_string_lossy().into_owned();
         }
     } else if p == "~"
-        && let Some(home) = dirs::home_dir() {
-            return home.to_string_lossy().into_owned();
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.to_string_lossy().into_owned();
+    }
     p.to_string()
 }
 
@@ -129,12 +130,13 @@ pub fn load_settings(args: Option<&Overrides>) -> Settings {
     let mut config_path = config_file();
 
     if let Some(a) = args
-        && let Some(cf) = &a.config_file {
-            let custom = PathBuf::from(cf);
-            if custom.exists() {
-                config_path = custom;
-            }
+        && let Some(cf) = &a.config_file
+    {
+        let custom = PathBuf::from(cf);
+        if custom.exists() {
+            config_path = custom;
         }
+    }
 
     // defaults < file
     let mut s = if config_path.exists() {

@@ -1,23 +1,13 @@
-//! Port of Python desktop_icon_view.py — custom GTK4 widgets.
-//!
-//! Two subclasses:
-//!   IconItem      : Gtk.Box  (one desktop icon + label)
-//!   DesktopIconView : Gtk.Fixed (free/grid layout, rubber-band, DnD, menus)
-//!
-//! Requires sibling modules:
-//!   crate::positions::Positions
-//!   crate::icon_provider::{IconProvider, DesktopIcon}
-
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 
+use gtk4_layer_shell::{KeyboardMode, LayerShell};
 use relm4::gtk;
 use relm4::gtk::prelude::*;
 use relm4::gtk::subclass::prelude::*;
 use relm4::gtk::{gdk, gio, glib, graphene, gsk, pango};
-use gtk4_layer_shell::{KeyboardMode, LayerShell};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Settings;
@@ -149,7 +139,11 @@ impl IconItem {
     }
 
     pub fn paintable(&self) -> Option<gdk::Paintable> {
-        self.imp().image.borrow().as_ref().and_then(|i| i.paintable())
+        self.imp()
+            .image
+            .borrow()
+            .as_ref()
+            .and_then(|i| i.paintable())
     }
 
     pub fn set_selected(&self, selected: bool) {
@@ -415,11 +409,19 @@ impl DesktopIconView {
     // ---- helpers to reach shared state ----
 
     fn settings(&self) -> Rc<RefCell<Settings>> {
-        self.imp().settings.borrow().clone().expect("settings unset")
+        self.imp()
+            .settings
+            .borrow()
+            .clone()
+            .expect("settings unset")
     }
 
     fn provider(&self) -> Rc<IconProvider> {
-        self.imp().icon_provider.borrow().clone().expect("provider unset")
+        self.imp()
+            .icon_provider
+            .borrow()
+            .clone()
+            .expect("provider unset")
     }
 
     fn emit_settings_changed(&self) {
@@ -484,7 +486,10 @@ impl DesktopIconView {
             }
 
             let item = IconItem::new(
-                desktop_icon.icon_name.as_deref().unwrap_or("text-x-generic"),
+                desktop_icon
+                    .icon_name
+                    .as_deref()
+                    .unwrap_or("text-x-generic"),
                 filename,
                 &full_path_s,
                 icon_size,
@@ -509,13 +514,14 @@ impl DesktopIconView {
     pub fn refresh(&self) {
         let path = self.imp().desktop_path.borrow().clone();
         if Path::new(&path).is_dir()
-            && let Ok(rd) = std::fs::read_dir(&path) {
-                let files: Vec<String> = rd
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect();
-                self.update_icons(&files, &path);
-            }
+            && let Ok(rd) = std::fs::read_dir(&path)
+        {
+            let files: Vec<String> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            self.update_icons(&files, &path);
+        }
     }
 
     /// compat shim — columns now from settings on layout
@@ -868,9 +874,10 @@ impl DesktopIconView {
         {
             let cur = imp.selected.borrow().clone();
             if let Some(cur) = cur
-                && Some(&cur) != item {
-                    cur.set_selected(false);
-                }
+                && Some(&cur) != item
+            {
+                cur.set_selected(false);
+            }
         }
         *imp.selected.borrow_mut() = item.cloned();
         if let Some(item) = item {
@@ -895,11 +902,7 @@ impl DesktopIconView {
             .unwrap_or_default()
     }
 
-    fn on_view_key(
-        &self,
-        keyval: gdk::Key,
-        state: gdk::ModifierType,
-    ) -> glib::Propagation {
+    fn on_view_key(&self, keyval: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
         if state.contains(gdk::ModifierType::CONTROL_MASK) {
             match keyval {
                 gdk::Key::c | gdk::Key::C => self.copy_selection(false),
@@ -1111,10 +1114,11 @@ impl DesktopIconView {
     fn on_rubber_begin(&self, x: f64, y: f64) {
         let picked = self.pick(x, y, gtk::PickFlags::DEFAULT);
         if let Some(p) = &picked
-            && p.upcast_ref::<gtk::Widget>() != self.upcast_ref::<gtk::Widget>() {
-                // a child was hit — let item handle; deny rubber
-                return;
-            }
+            && p.upcast_ref::<gtk::Widget>() != self.upcast_ref::<gtk::Widget>()
+        {
+            // a child was hit — let item handle; deny rubber
+            return;
+        }
         let imp = self.imp();
         imp.rubber_active.set(true);
         imp.rubber_start.set((x, y));
@@ -1191,9 +1195,10 @@ impl DesktopIconView {
         self.ensure_keyboard();
         let picked = self.pick(x, y, gtk::PickFlags::DEFAULT);
         if let Some(p) = &picked
-            && p.upcast_ref::<gtk::Widget>() != self.upcast_ref::<gtk::Widget>() {
-                return;
-            }
+            && p.upcast_ref::<gtk::Widget>() != self.upcast_ref::<gtk::Widget>()
+        {
+            return;
+        }
         let button = gesture.current_button();
         if button == gdk::BUTTON_PRIMARY {
             self.select(None);
@@ -1232,18 +1237,17 @@ impl DesktopIconView {
         let s_type = glib::VariantTy::STRING;
 
         let make_stateful = |name: &str, cur: String| {
-            
-            gio::SimpleAction::new_stateful(
-                name,
-                Some(s_type),
-                &cur.to_variant(),
-            )
+            gio::SimpleAction::new_stateful(name, Some(s_type), &cur.to_variant())
         };
 
         let settings = self.settings();
         let (sort_by, sort_order, arrange_mode) = {
             let s = settings.borrow();
-            (s.sort_by.clone(), s.sort_order.clone(), s.arrange_mode.clone())
+            (
+                s.sort_by.clone(),
+                s.sort_order.clone(),
+                s.arrange_mode.clone(),
+            )
         };
 
         let a_sort_by = make_stateful("sort-by", sort_by);
@@ -1391,13 +1395,7 @@ impl DesktopIconView {
         (x, y)
     }
 
-    fn popup_menu(
-        &self,
-        model: gio::MenuModel,
-        item: Option<&IconItem>,
-        x: f64,
-        y: f64,
-    ) {
+    fn popup_menu(&self, model: gio::MenuModel, item: Option<&IconItem>, x: f64, y: f64) {
         let popover = gtk::PopoverMenu::from_model(Some(&model));
         popover.set_has_arrow(false);
         popover.set_parent(self);
@@ -1513,9 +1511,10 @@ impl DesktopIconView {
                 do_delete,
                 move |res| {
                     if let Ok(idx) = res
-                        && idx == 1 {
-                            do_delete();
-                        }
+                        && idx == 1
+                    {
+                        do_delete();
+                    }
                 }
             ),
         );
@@ -1597,10 +1596,7 @@ impl DesktopIconView {
                 }
                 let dst = dir.join(&new_name);
                 if dst.exists() {
-                    view.alert(
-                        "Rename failed",
-                        &format!("“{new_name}” already exists."),
-                    );
+                    view.alert("Rename failed", &format!("“{new_name}” already exists."));
                     win.close();
                     return;
                 }
@@ -1658,7 +1654,11 @@ impl DesktopIconView {
             Err(e) => (0, format!("unknown ({})", e)),
         };
 
-        let kind = if Path::new(&path).is_dir() { "Folder" } else { "File" };
+        let kind = if Path::new(&path).is_dir() {
+            "Folder"
+        } else {
+            "File"
+        };
         let detail = format!(
             "Name: {}\nPath: {}\nType: {}\nSize: {}\nModified: {}",
             item.filename(),
@@ -1746,9 +1746,7 @@ impl DesktopIconView {
         let mut w = self.pick(x, y, gtk::PickFlags::DEFAULT)?;
         loop {
             if let Some(it) = w.downcast_ref::<IconItem>() {
-                return Path::new(&it.file_path())
-                    .is_dir()
-                    .then(|| it.clone());
+                return Path::new(&it.file_path()).is_dir().then(|| it.clone());
             }
             w = w.parent()?;
         }
@@ -1849,7 +1847,10 @@ impl DesktopIconView {
                         .iter()
                         .filter_map(|(f, _, _)| by.get(f).map(|i| i.file_path()))
                         .collect(),
-                    None => by.get(name).map(|i| vec![i.file_path()]).unwrap_or_default(),
+                    None => by
+                        .get(name)
+                        .map(|i| vec![i.file_path()])
+                        .unwrap_or_default(),
                 }
             } else {
                 paths.clone()
@@ -1869,7 +1870,9 @@ impl DesktopIconView {
                     .unwrap_or_default();
                 let parent = first_real.parent().map(|p| p.to_path_buf());
                 if imp.icons_by_name.borrow().contains_key(&base)
-                    && parent.as_deref().and_then(|p| std::fs::canonicalize(p).ok())
+                    && parent
+                        .as_deref()
+                        .and_then(|p| std::fs::canonicalize(p).ok())
                         == dest_real
                 {
                     anchor_name = Some(base);
@@ -2027,8 +2030,14 @@ fn unique_path(path: &str) -> String {
         return path.to_string();
     }
     let p = Path::new(path);
-    let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let ext = p.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = p
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy()))
+        .unwrap_or_default();
     let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
     let mut n = 1;
     loop {
@@ -2088,12 +2097,14 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
         out.push(bytes[i]);
         i += 1;
     }
@@ -2206,16 +2217,13 @@ fn request_hypr_focus(pid: u32) {
         return;
     }
     for delay_ms in [150u64, 450, 1000] {
-        glib::timeout_add_local_once(
-            std::time::Duration::from_millis(delay_ms),
-            move || {
-                let _ = clean_command("hyprctl")
-                    .args(["dispatch", "focuswindow", &format!("pid:{pid}")])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
-            },
-        );
+        glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
+            let _ = clean_command("hyprctl")
+                .args(["dispatch", "focuswindow", &format!("pid:{pid}")])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        });
     }
 }
 

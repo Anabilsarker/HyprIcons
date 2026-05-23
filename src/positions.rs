@@ -1,5 +1,3 @@
-//! Port of Python src/positions.py — per-icon free placement persistence.
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -52,20 +50,26 @@ impl Positions {
             for (k, v) in map {
                 if let Value::Array(arr) = v
                     && arr.len() == 2
-                        && let (Some(x), Some(y)) = (arr[0].as_i64(), arr[1].as_i64()) {
-                            self.data.insert(k, (x as i32, y as i32));
-                        }
+                    && let (Some(x), Some(y)) = (arr[0].as_i64(), arr[1].as_i64())
+                {
+                    self.data.insert(k, (x as i32, y as i32));
+                }
             }
-            debug!("Loaded {} positions from {}", self.data.len(), self.path.display());
+            debug!(
+                "Loaded {} positions from {}",
+                self.data.len(),
+                self.path.display()
+            );
         }
     }
 
     pub fn save(&self) {
         if let Some(parent) = self.path.parent()
-            && let Err(e) = fs::create_dir_all(parent) {
-                warn!("Failed to save positions: {}", e);
-                return;
-            }
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            warn!("Failed to save positions: {}", e);
+            return;
+        }
         let map: serde_json::Map<String, Value> = self
             .data
             .iter()

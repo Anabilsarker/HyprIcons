@@ -1,5 +1,3 @@
-//! Port of Python src/icon_provider.py — resolves a path to a themed icon.
-
 use std::cell::Cell;
 use std::path::Path;
 
@@ -135,11 +133,13 @@ impl IconProvider {
 
         // Absolute path to an existing file → load directly as a texture.
         let p = Path::new(&icon_name);
-        if p.is_absolute() && p.is_file()
-            && let Some(tex) = self.lookup_file(&icon_name) {
-                debug!("Icon resolved: {} → {}", desktop_icon.name, icon_name);
-                return Some(tex);
-            }
+        if p.is_absolute()
+            && p.is_file()
+            && let Some(tex) = self.lookup_file(&icon_name)
+        {
+            debug!("Icon resolved: {} → {}", desktop_icon.name, icon_name);
+            return Some(tex);
+        }
 
         if self.icon_theme.has_icon(&icon_name) {
             let paintable = self.lookup(&icon_name);

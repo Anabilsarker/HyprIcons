@@ -1,5 +1,3 @@
-//! Port of Python main.py::DesktopWindow — one layer-shell window per monitor.
-
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -10,8 +8,8 @@ use crate::icon_provider::IconProvider;
 
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use relm4::gtk;
-use relm4::gtk::prelude::*;
 use relm4::gtk::gdk;
+use relm4::gtk::prelude::*;
 use tracing::debug;
 
 pub struct DesktopWindow {
@@ -62,8 +60,9 @@ impl DesktopWindow {
 
         // get_parent_window callback resolves to this window.
         let win_for_cb = window.clone();
-        callbacks.get_parent_window =
-            Some(Rc::new(move || Some(win_for_cb.clone().upcast::<gtk::Window>())));
+        callbacks.get_parent_window = Some(Rc::new(move || {
+            Some(win_for_cb.clone().upcast::<gtk::Window>())
+        }));
 
         let icon_view = DesktopIconView::new(icon_provider, settings.clone(), callbacks);
 
@@ -112,14 +111,15 @@ impl DesktopWindow {
     pub fn refresh_icons(&self) {
         let path = self.settings.borrow().desktop_path.clone();
         if Path::new(&path).exists()
-            && let Ok(rd) = std::fs::read_dir(&path) {
-                let files: Vec<String> = rd
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect();
-                debug!("refresh_icons: {} files", files.len());
-                self.icon_view.update_icons(&files, &path);
-            }
+            && let Ok(rd) = std::fs::read_dir(&path)
+        {
+            let files: Vec<String> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            debug!("refresh_icons: {} files", files.len());
+            self.icon_view.update_icons(&files, &path);
+        }
     }
 
     pub fn update_icons(&self, files: &[String], desktop_path: &str) {
