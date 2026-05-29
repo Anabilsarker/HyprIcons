@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4_layer_shell::{KeyboardMode, LayerShell};
@@ -11,7 +11,7 @@ use relm4::gtk::{gdk, gio, glib, graphene, gsk, pango};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Settings;
-use crate::icon_provider::IconProvider;
+use crate::icon_provider::{DesktopIcon, IconProvider};
 use crate::positions::Positions;
 
 pub const ICON_GAP_X: i32 = 4;
@@ -55,6 +55,11 @@ mod icon_item_imp {
         pub label: RefCell<Option<gtk::Label>>,
         pub click_pending: Cell<bool>,
         pub collapse_on_release: Cell<bool>,
+        // Special items (Home, Trash) are synthetic — not files on the
+        // desktop. They can't be renamed/deleted/dragged, and may open a
+        // URI (e.g. trash:///) instead of their backing path.
+        pub special: Cell<bool>,
+        pub open_uri: RefCell<Option<String>>,
     }
 
     #[glib::object_subclass]
@@ -132,6 +137,28 @@ impl IconItem {
         self.imp().filename.borrow().clone()
     }
 
+    /// Override the positions/layout key (special items use a stable label
+    /// instead of the backing path's basename).
+    pub fn set_filename(&self, name: &str) {
+        *self.imp().filename.borrow_mut() = name.to_string();
+    }
+
+    pub fn set_special(&self, special: bool) {
+        self.imp().special.set(special);
+    }
+
+    pub fn is_special(&self) -> bool {
+        self.imp().special.get()
+    }
+
+    pub fn set_open_uri(&self, uri: &str) {
+        *self.imp().open_uri.borrow_mut() = Some(uri.to_string());
+    }
+
+    pub fn open_uri(&self) -> Option<String> {
+        self.imp().open_uri.borrow().clone()
+    }
+
     pub fn set_icon_paintable(&self, paintable: &impl IsA<gdk::Paintable>) {
         if let Some(img) = self.imp().image.borrow().as_ref() {
             img.set_paintable(Some(paintable));
@@ -202,6 +229,11 @@ mod view_imp {
         pub rubber_cur: Cell<(f64, f64)>,
         pub drag_group: RefCell<Option<DragGroup>>,
         pub drop_hl: RefCell<Option<IconItem>>,
+        // The item currently being dragged from this view. Set on drag
+        // prepare, cleared on drag end. Lets on_drop recognise an internal
+        // (reposition) drag without depending on fragile DnD content-type
+        // negotiation — critical for special items, which carry no file URI.
+        pub drag_item: RefCell<Option<IconItem>>,
     }
 
     impl Default for DesktopIconView {
@@ -221,6 +253,7 @@ mod view_imp {
                 rubber_cur: Cell::new((0.0, 0.0)),
                 drag_group: RefCell::new(None),
                 drop_hl: RefCell::new(None),
+                drag_item: RefCell::new(None),
             }
         }
     }
@@ -325,10 +358,15 @@ impl DesktopIconView {
             glib::Type::STRING,
             gdk::DragAction::MOVE | gdk::DragAction::COPY,
         );
+        // STRING first: internal drags (icon name / uri-list text) negotiate
+        // as STRING and reach on_drop intact. If STRING were after FileList,
+        // GTK would coerce a bare name token into a null GdkFileList and the
+        // reposition signal would be lost. External file drops that can't be
+        // delivered as STRING fall through to FileList / File.
         drop_target.set_types(&[
+            glib::Type::STRING,
             gdk::FileList::static_type(),
             gio::File::static_type(),
-            glib::Type::STRING,
         ]);
         drop_target.connect_drop(glib::clone!(
             #[weak]
@@ -344,7 +382,20 @@ impl DesktopIconView {
             #[upgrade_or]
             gdk::DragAction::empty(),
             move |_, x, y| {
-                obj.set_drop_highlight(obj.folder_at(x, y).as_ref());
+                // A special icon being dragged can only be repositioned, so
+                // don't highlight folder/special drop targets for it.
+                let dragging_special = obj
+                    .imp()
+                    .drag_item
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|i| i.is_special());
+                let target = if dragging_special {
+                    None
+                } else {
+                    obj.folder_at(x, y).or_else(|| obj.special_at(x, y))
+                };
+                obj.set_drop_highlight(target.as_ref());
                 gdk::DragAction::MOVE
             }
         ));
@@ -462,6 +513,8 @@ impl DesktopIconView {
         let mut visible: Vec<String> = Vec::new();
         let provider = self.provider();
 
+        self.add_special_icons(icon_size, &mut visible);
+
         for filename in &sorted {
             let full_path = Path::new(desktop_path).join(filename);
             if !full_path.exists() {
@@ -509,6 +562,58 @@ impl DesktopIconView {
         imp.positions.borrow_mut().prune(&visible);
         self.layout_all();
         info!("Icons loaded: {} ok, {} missing icon", loaded, failed);
+    }
+
+    /// Prepend the active user's Home and Trash icons (when enabled). These
+    /// are synthetic — they live before the file icons at grid index 0/1.
+    fn add_special_icons(&self, icon_size: i32, visible: &mut Vec<String>) {
+        let (show_home, show_trash) = {
+            let s = self.settings();
+            let s = s.borrow();
+            (s.show_home, s.show_trash)
+        };
+        let imp = self.imp();
+        let provider = self.provider();
+
+        let mut add = |label: &str, icon_name: &str, path: String, uri: Option<&str>| {
+            let di = DesktopIcon {
+                name: label.to_string(),
+                path: path.clone(),
+                icon_name: Some(icon_name.to_string()),
+                is_app: false,
+                is_dir: true,
+            };
+            let paintable = provider.load_icon_paintable(&di);
+            let item = IconItem::new(icon_name, label, &path, icon_size);
+            item.set_filename(label);
+            item.set_special(true);
+            if let Some(u) = uri {
+                item.set_open_uri(u);
+            }
+            if let Some(p) = paintable {
+                item.set_icon_paintable(&p);
+            }
+            self.attach_item_controllers(&item);
+            imp.icons.borrow_mut().push(item.clone());
+            imp.icons_by_name
+                .borrow_mut()
+                .insert(label.to_string(), item);
+            visible.push(label.to_string());
+        };
+
+        if show_home
+            && let Some(home) = dirs::home_dir()
+        {
+            add("Home", "user-home", home.to_string_lossy().into_owned(), None);
+        }
+        if show_trash {
+            let icon = if trash_has_files() {
+                "user-trash-full"
+            } else {
+                "user-trash"
+            };
+            add("Trash", icon, trash_files_dir(), Some("trash:///"));
+        }
     }
 
     pub fn refresh(&self) {
@@ -671,6 +776,15 @@ impl DesktopIconView {
             item,
             move |src, _| view.on_drag_begin(src, &item)
         ));
+        drag_src.connect_drag_end(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_, _, _| {
+                let imp = view.imp();
+                *imp.drag_item.borrow_mut() = None;
+                *imp.drag_group.borrow_mut() = None;
+            }
+        ));
         item.add_controller(drag_src);
     }
 
@@ -758,6 +872,17 @@ impl DesktopIconView {
     }
 
     fn launch_item(&self, item: &IconItem) {
+        // Special items may open a URI (e.g. Trash → trash:///) rather than
+        // their backing filesystem path.
+        if let Some(uri) = item.open_uri() {
+            info!("Launching URI: {}", uri);
+            if open_uri_default(&uri) {
+                self.notify_activated(&uri);
+                self.release_focus();
+            }
+            return;
+        }
+
         let path = item.file_path();
         info!("Launching: {}", path);
         let ext = Path::new(&path)
@@ -1370,6 +1495,14 @@ impl DesktopIconView {
         let root = gio::Menu::new();
         let sect = gio::Menu::new();
         sect.append(Some("Open"), Some("desktop.open"));
+        if item.is_special() {
+            // Home/Trash: open only — no rename/delete/properties.
+            root.append_section(None, &sect);
+            root.append_section(None, &self.build_sort_section());
+            let (vx, vy) = self.translate_item_to_view(item, x, y);
+            self.popup_menu(root.upcast(), Some(item), vx, vy);
+            return;
+        }
         if item.file_path().to_ascii_lowercase().ends_with(".iso") {
             if iso_mountpoint(&item.file_path()).is_some() {
                 sect.append(Some("Unmount"), Some("desktop.iso-unmount"));
@@ -1473,6 +1606,9 @@ impl DesktopIconView {
     // ---- file ops ----
 
     fn delete_item(&self, item: &IconItem) {
+        if item.is_special() {
+            return;
+        }
         let path = item.file_path();
         let filename = item.filename();
         let window = self.parent_window();
@@ -1521,6 +1657,9 @@ impl DesktopIconView {
     }
 
     fn rename_item(&self, item: &IconItem) {
+        if item.is_special() {
+            return;
+        }
         let old_path = item.file_path();
         let Some(dir) = Path::new(&old_path).parent().map(|d| d.to_path_buf()) else {
             error!("rename: no parent dir for {}", old_path);
@@ -1680,6 +1819,9 @@ impl DesktopIconView {
     // ---- drag source ----
 
     fn on_drag_prepare(&self, item: &IconItem) -> Option<gdk::ContentProvider> {
+        // Special items (Home/Trash) are draggable for repositioning, but
+        // carry no file URIs — they must never be exported as files to an
+        // external drop target (or moved into a folder).
         let imp = self.imp();
         let (group, paths): (Option<DragGroup>, Vec<String>) = {
             let sel = imp.selection.borrow();
@@ -1699,14 +1841,28 @@ impl DesktopIconView {
                 }
                 let p: Vec<String> = g
                     .iter()
-                    .filter_map(|(f, _, _)| by_name.get(f).map(|i| i.file_path()))
+                    .filter_map(|(f, _, _)| by_name.get(f))
+                    .filter(|i| !i.is_special())
+                    .map(|i| i.file_path())
                     .collect();
                 (Some(g), p)
+            } else if item.is_special() {
+                (None, Vec::new())
             } else {
                 (None, vec![item.file_path()])
             }
         };
         *imp.drag_group.borrow_mut() = group;
+        *imp.drag_item.borrow_mut() = Some(item.clone());
+
+        let name_provider = gdk::ContentProvider::for_value(&item.filename().to_value());
+
+        // No real file paths (dragging only special items) → offer the name
+        // token alone. A union with an empty uri-list would let the drop
+        // target prefer FileList and lose the internal-reposition signal.
+        if paths.is_empty() {
+            return Some(name_provider);
+        }
 
         let uri_lines = paths
             .iter()
@@ -1722,11 +1878,13 @@ impl DesktopIconView {
             "text/plain;charset=utf-8",
             &glib::Bytes::from(paths.join("\n").as_bytes()),
         );
-        let name_provider = gdk::ContentProvider::for_value(&item.filename().to_value());
+        // name_provider first: with STRING as the drop target's preferred
+        // type, this makes the internal reposition token win negotiation over
+        // the file-path text. External consumers still pick uri-list/text.
         Some(gdk::ContentProvider::new_union(&[
+            name_provider,
             uri_provider,
             text_provider,
-            name_provider,
         ]))
     }
 
@@ -1746,10 +1904,50 @@ impl DesktopIconView {
         let mut w = self.pick(x, y, gtk::PickFlags::DEFAULT)?;
         loop {
             if let Some(it) = w.downcast_ref::<IconItem>() {
+                if it.is_special() {
+                    return None;
+                }
                 return Path::new(&it.file_path()).is_dir().then(|| it.clone());
             }
             w = w.parent()?;
         }
+    }
+
+    /// Special item (Home/Trash) under (x, y) in view coords, if any.
+    fn special_at(&self, x: f64, y: f64) -> Option<IconItem> {
+        let mut w = self.pick(x, y, gtk::PickFlags::DEFAULT)?;
+        loop {
+            if let Some(it) = w.downcast_ref::<IconItem>() {
+                return it.is_special().then(|| it.clone());
+            }
+            w = w.parent()?;
+        }
+    }
+
+    /// Send paths to the trash (freedesktop). Returns true if any succeeded.
+    fn trash_paths(&self, paths: &[String]) -> bool {
+        let imp = self.imp();
+        let mut any = false;
+        for src in paths {
+            let gfile = gio::File::for_path(src);
+            match gfile.trash(gio::Cancellable::NONE) {
+                Ok(_) => {
+                    info!("Trashed: {}", src);
+                    if let Some(base) = Path::new(src).file_name() {
+                        imp.positions
+                            .borrow_mut()
+                            .remove(&base.to_string_lossy());
+                    }
+                    any = true;
+                }
+                Err(e) => error!("Trash {} failed: {}", src, e),
+            }
+        }
+        if any {
+            imp.positions.borrow().save();
+            self.refresh();
+        }
+        any
     }
 
     fn set_drop_highlight(&self, item: Option<&IconItem>) {
@@ -1810,83 +2008,80 @@ impl DesktopIconView {
 
     fn on_drop(&self, value: &glib::Value, x: f64, y: f64) -> bool {
         let imp = self.imp();
-        let mut paths: Vec<String> = Vec::new();
-        let mut anchor_name: Option<String> = None;
-
-        if let Ok(s) = value.get::<String>() {
-            if imp.icons_by_name.borrow().contains_key(&s) {
-                anchor_name = Some(s);
-            } else {
-                paths = parse_uri_list(&s);
-            }
-        } else if let Ok(list) = value.get::<gdk::FileList>() {
-            paths = list
-                .files()
-                .iter()
-                .filter_map(|f| f.path())
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect();
-        } else if let Ok(file) = value.get::<gio::File>() {
-            if let Some(p) = file.path() {
-                paths = vec![p.to_string_lossy().into_owned()];
-            }
-        } else {
-            warn!("Drop: unsupported value type {}", value.type_());
-            self.set_drop_highlight(None);
-            return false;
-        }
-
-        // Released over a folder icon → move source(s) into that folder.
         self.set_drop_highlight(None);
-        if let Some(folder) = self.folder_at(x, y) {
-            let folder_path = folder.file_path();
-            let sources: Vec<String> = if let Some(name) = &anchor_name {
+
+        // Internal drag (an icon from this view being repositioned/moved)?
+        // Recognised via drag_item, set on drag prepare — independent of the
+        // DnD content type, which GTK mangles for the URI-less special items.
+        let internal = imp.drag_item.borrow().clone();
+
+        // Real filesystem paths being dragged. Special items (Home/Trash) are
+        // synthetic and excluded — they can never be moved into a folder or
+        // trashed, only repositioned.
+        let sources: Vec<String> = match &internal {
+            Some(item) => {
                 let by = imp.icons_by_name.borrow();
                 match imp.drag_group.borrow().clone() {
                     Some(g) => g
                         .iter()
-                        .filter_map(|(f, _, _)| by.get(f).map(|i| i.file_path()))
+                        .filter_map(|(f, _, _)| by.get(f))
+                        .filter(|i| !i.is_special())
+                        .map(|i| i.file_path())
                         .collect(),
-                    None => by
-                        .get(name)
-                        .map(|i| vec![i.file_path()])
-                        .unwrap_or_default(),
+                    None if item.is_special() => Vec::new(),
+                    None => vec![item.file_path()],
                 }
-            } else {
-                paths.clone()
-            };
-            if self.move_into_folder(&sources, &folder_path) {
-                *imp.drag_group.borrow_mut() = None;
+            }
+            None => self.value_to_paths(value),
+        };
+
+        // Released over Home → move into the home dir; over Trash → trash.
+        // (No real sources = dragging a special icon itself → reposition.)
+        if let Some(special) = self.special_at(x, y) {
+            if !sources.is_empty() {
+                let handled = if special.open_uri().as_deref() == Some("trash:///") {
+                    self.trash_paths(&sources)
+                } else {
+                    self.move_into_folder(&sources, &special.file_path())
+                };
+                if handled {
+                    return true;
+                }
+            }
+        } else if let Some(folder) = self.folder_at(x, y) {
+            // Released over a folder icon → move source(s) into that folder.
+            if !sources.is_empty() && self.move_into_folder(&sources, &folder.file_path()) {
                 return true;
             }
         }
 
-        if anchor_name.is_none() && !paths.is_empty() {
-            let dest_real = std::fs::canonicalize(&*imp.desktop_path.borrow()).ok();
-            if let Ok(first_real) = std::fs::canonicalize(&paths[0]) {
-                let base = first_real
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let parent = first_real.parent().map(|p| p.to_path_buf());
-                if imp.icons_by_name.borrow().contains_key(&base)
-                    && parent
-                        .as_deref()
-                        .and_then(|p| std::fs::canonicalize(p).ok())
-                        == dest_real
-                {
-                    anchor_name = Some(base);
-                }
-            }
+        // Internal drag not consumed by a folder/special target → reposition.
+        if let Some(item) = internal {
+            return self.reposition_drop(&item, x, y);
         }
 
-        if let Some(name) = anchor_name {
-            let item = imp.icons_by_name.borrow().get(&name).cloned();
-            if let Some(item) = item {
-                return self.reposition_drop(&item, x, y);
-            }
+        // External drop on empty desktop → import into the desktop folder.
+        self.import_paths(&sources, x, y)
+    }
+
+    /// Extract filesystem paths from an external drop value.
+    fn value_to_paths(&self, value: &glib::Value) -> Vec<String> {
+        if let Ok(s) = value.get::<String>() {
+            parse_uri_list(&s)
+        } else if let Ok(list) = value.get::<gdk::FileList>() {
+            list.files()
+                .iter()
+                .filter_map(|f| f.path())
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect()
+        } else if let Ok(file) = value.get::<gio::File>() {
+            file.path()
+                .map(|p| vec![p.to_string_lossy().into_owned()])
+                .unwrap_or_default()
+        } else {
+            warn!("Drop: unsupported value type {}", value.type_());
+            Vec::new()
         }
-        self.import_paths(&paths, x, y)
     }
 
     fn reposition_drop(&self, item: &IconItem, x: f64, y: f64) -> bool {
@@ -2277,6 +2472,54 @@ fn launch_desktop_entry(path: &str) -> bool {
         }
         Err(e) => {
             error!("Launch .desktop {} failed: {}", path, e);
+            false
+        }
+    }
+}
+
+/// `$XDG_DATA_HOME/Trash/files` (or `~/.local/share/Trash/files`) — the
+/// freedesktop trash directory for the active user.
+fn trash_files_dir() -> String {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))
+        .unwrap_or_default();
+    base.join("Trash")
+        .join("files")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// True if the trash holds at least one entry (picks the full vs empty icon).
+fn trash_has_files() -> bool {
+    std::fs::read_dir(trash_files_dir())
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false)
+}
+
+/// Open a URI (e.g. `trash:///`) with its default handler, falling back to
+/// `xdg-open`. Same `LD_PRELOAD`-clean launch context as file launches.
+fn open_uri_default(uri: &str) -> bool {
+    let ctx = clean_launch_context();
+    if let Some(ctx) = &ctx {
+        ctx.connect_launched(|_, _, platform_data| {
+            let dict = glib::VariantDict::new(Some(platform_data));
+            if let Ok(Some(pid)) = dict.lookup::<i32>("pid") {
+                request_hypr_focus(pid as u32);
+            }
+        });
+    }
+    if gio::AppInfo::launch_default_for_uri(uri, ctx.as_ref()).is_ok() {
+        return true;
+    }
+    match clean_command("xdg-open").arg(uri).spawn() {
+        Ok(child) => {
+            request_hypr_focus(child.id());
+            true
+        }
+        Err(e) => {
+            error!("xdg-open {} failed: {}", uri, e);
             false
         }
     }

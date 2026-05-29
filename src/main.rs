@@ -109,6 +109,14 @@ struct Args {
     #[arg(long)]
     columns: Option<i32>,
 
+    /// Show Home icon (--show-home / --no-show-home)
+    #[arg(long = "show-home", action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    show_home: Option<bool>,
+
+    /// Show Trash icon (--show-trash / --no-show-trash)
+    #[arg(long = "show-trash", action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    show_trash: Option<bool>,
+
     /// Enable debug output
     #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     debug: Option<bool>,
@@ -132,6 +140,8 @@ impl Args {
             columns: self.columns,
             theme: None,
             arrange_mode: None,
+            show_home: self.show_home,
+            show_trash: self.show_trash,
             debug: self.debug,
         }
     }

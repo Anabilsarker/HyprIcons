@@ -58,6 +58,12 @@ fn d_theme() -> String {
 fn d_arrange_mode() -> String {
     "auto".into()
 }
+fn d_show_home() -> bool {
+    true
+}
+fn d_show_trash() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -81,6 +87,10 @@ pub struct Settings {
     pub theme: String,
     #[serde(default = "d_arrange_mode")]
     pub arrange_mode: String,
+    #[serde(default = "d_show_home")]
+    pub show_home: bool,
+    #[serde(default = "d_show_trash")]
+    pub show_trash: bool,
 
     // excluded from JSON (Python: filtered in save, absent in file)
     #[serde(skip)]
@@ -103,6 +113,8 @@ impl Default for Settings {
             columns: d_columns(),
             theme: d_theme(),
             arrange_mode: d_arrange_mode(),
+            show_home: d_show_home(),
+            show_trash: d_show_trash(),
             debug: false,
             config_file: None,
         }
@@ -123,6 +135,8 @@ pub struct Overrides {
     pub columns: Option<i32>,
     pub theme: Option<String>,
     pub arrange_mode: Option<String>,
+    pub show_home: Option<bool>,
+    pub show_trash: Option<bool>,
     pub debug: Option<bool>,
 }
 
@@ -179,6 +193,12 @@ pub fn load_settings(args: Option<&Overrides>) -> Settings {
         }
         if let Some(v) = &a.arrange_mode {
             s.arrange_mode = v.clone();
+        }
+        if let Some(v) = a.show_home {
+            s.show_home = v;
+        }
+        if let Some(v) = a.show_trash {
+            s.show_trash = v;
         }
         if let Some(v) = a.debug {
             s.debug = v;
