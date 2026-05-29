@@ -229,6 +229,9 @@ mod view_imp {
         pub rubber_cur: Cell<(f64, f64)>,
         pub drag_group: RefCell<Option<DragGroup>>,
         pub drop_hl: RefCell<Option<IconItem>>,
+        // Last allocated height — drives the column-wise grid (how many rows
+        // fit). Reflow when it changes.
+        pub alloc_h: Cell<i32>,
         // The item currently being dragged from this view. Set on drag
         // prepare, cleared on drag end. Lets on_drop recognise an internal
         // (reposition) drag without depending on fragile DnD content-type
@@ -253,6 +256,7 @@ mod view_imp {
                 rubber_cur: Cell::new((0.0, 0.0)),
                 drag_group: RefCell::new(None),
                 drop_hl: RefCell::new(None),
+                alloc_h: Cell::new(0),
                 drag_item: RefCell::new(None),
             }
         }
@@ -269,6 +273,29 @@ mod view_imp {
     impl FixedImpl for DesktopIconView {}
 
     impl WidgetImpl for DesktopIconView {
+        // The grid is sized against the top-level window (the usable desktop
+        // area), NOT this view's own allocation. A gtk::Fixed's natural size
+        // tracks its children, so reading self.height() would feed back: a
+        // child resize (e.g. the selected icon's label expanding on hover)
+        // re-measures the view and jitters the grid. We reflow only when the
+        // window's usable height actually changes, deferred to idle to avoid
+        // re-entering allocation.
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            self.parent_size_allocate(width, height, baseline);
+            let obj = self.obj();
+            let area_h = obj.area_height();
+            if area_h <= 0 || area_h == self.alloc_h.get() {
+                return;
+            }
+            self.alloc_h.set(area_h);
+            let obj = obj.clone();
+            glib::idle_add_local_once(move || {
+                if obj.settings().borrow().arrange_mode != "free" {
+                    obj.layout_all();
+                }
+            });
+        }
+
         // do_snapshot override — draw children (parent) then rubber-band overlay.
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             self.parent_snapshot(snapshot);
@@ -665,20 +692,47 @@ impl DesktopIconView {
         v
     }
 
-    fn columns(&self) -> i32 {
-        let s = self.settings();
-        let c = s.borrow().columns;
-        if c < 1 { 4 } else { c }
+    const GRID_MARGIN: i32 = 8;
+
+    /// Usable desktop height = the top-level window's allocated height. Stable
+    /// (monitor-sized), unlike this Fixed's content-driven natural size.
+    fn area_height(&self) -> i32 {
+        self.root()
+            .and_downcast::<gtk::Window>()
+            .map(|w| w.height())
+            .unwrap_or(0)
     }
 
+    /// Rows that fit in the usable desktop height — the column-wise grid
+    /// fills a column top-to-bottom before moving to the next column.
+    fn rows(&self) -> i32 {
+        let icon_size = self.settings().borrow().icon_size;
+        let (_, ch) = cell_size(icon_size);
+        let h = self.area_height();
+        if h <= 0 || ch <= 0 {
+            // Not realized yet — fall back to one column; size_allocate
+            // reflows once the real height is known.
+            return 1.max(self.icons_count());
+        }
+        ((h - 2 * Self::GRID_MARGIN) / ch).max(1)
+    }
+
+    fn icons_count(&self) -> i32 {
+        self.imp().icons.borrow().len() as i32
+    }
+
+    /// Column-major grid placement: index 0 top-left, filling down each
+    /// column before starting the next column to the right.
     fn grid_position(&self, index: i32) -> (i32, i32) {
-        let cols = self.columns();
+        let rows = self.rows();
         let icon_size = self.settings().borrow().icon_size;
         let (cw, ch) = cell_size(icon_size);
-        let col = index % cols;
-        let row = index / cols;
-        let margin = 8;
-        (margin + col * cw, margin + row * ch)
+        let col = index / rows;
+        let row = index % rows;
+        (
+            Self::GRID_MARGIN + col * cw,
+            Self::GRID_MARGIN + row * ch,
+        )
     }
 
     fn layout_all(&self) {
