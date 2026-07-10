@@ -229,9 +229,6 @@ mod view_imp {
         pub rubber_cur: Cell<(f64, f64)>,
         pub drag_group: RefCell<Option<DragGroup>>,
         pub drop_hl: RefCell<Option<IconItem>>,
-        // Last allocated height — drives the column-wise grid (how many rows
-        // fit). Reflow when it changes.
-        pub alloc_h: Cell<i32>,
         // The item currently being dragged from this view. Set on drag
         // prepare, cleared on drag end. Lets on_drop recognise an internal
         // (reposition) drag without depending on fragile DnD content-type
@@ -256,7 +253,6 @@ mod view_imp {
                 rubber_cur: Cell::new((0.0, 0.0)),
                 drag_group: RefCell::new(None),
                 drop_hl: RefCell::new(None),
-                alloc_h: Cell::new(0),
                 drag_item: RefCell::new(None),
             }
         }
@@ -273,29 +269,6 @@ mod view_imp {
     impl FixedImpl for DesktopIconView {}
 
     impl WidgetImpl for DesktopIconView {
-        // The grid is sized against the top-level window (the usable desktop
-        // area), NOT this view's own allocation. A gtk::Fixed's natural size
-        // tracks its children, so reading self.height() would feed back: a
-        // child resize (e.g. the selected icon's label expanding on hover)
-        // re-measures the view and jitters the grid. We reflow only when the
-        // window's usable height actually changes, deferred to idle to avoid
-        // re-entering allocation.
-        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            self.parent_size_allocate(width, height, baseline);
-            let obj = self.obj();
-            let area_h = obj.area_height();
-            if area_h <= 0 || area_h == self.alloc_h.get() {
-                return;
-            }
-            self.alloc_h.set(area_h);
-            let obj = obj.clone();
-            glib::idle_add_local_once(move || {
-                if obj.settings().borrow().arrange_mode != "free" {
-                    obj.layout_all();
-                }
-            });
-        }
-
         // do_snapshot override — draw children (parent) then rubber-band overlay.
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             self.parent_snapshot(snapshot);
@@ -441,6 +414,20 @@ impl DesktopIconView {
                 move |_, _| obj.maybe_reflow()
             ),
         );
+
+        // The first layout in update_icons runs before the window is
+        // allocated (usable area unknown → everything in one column). Once
+        // the frame clock starts and the area is known, relayout once and
+        // stop the callback. size_allocate handles later size changes.
+        obj.add_tick_callback(|view, _clock| {
+            if view.area_height() > 0 {
+                debug!("tick relayout: area_h={}", view.area_height());
+                view.layout_all();
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
 
         // View-level keys: arrow navigation + clipboard (Ctrl+C/X/V).
         let nav = gtk::EventControllerKey::new();
@@ -694,13 +681,20 @@ impl DesktopIconView {
 
     const GRID_MARGIN: i32 = 8;
 
-    /// Usable desktop height = the top-level window's allocated height. Stable
-    /// (monitor-sized), unlike this Fixed's content-driven natural size.
+    /// Usable desktop height. Read from a container ancestor (viewport /
+    /// ScrolledWindow / window) whose allocation is the stable viewport size,
+    /// NOT this Fixed's content-driven natural height (which would feed back
+    /// into the grid). Returns the first ancestor reporting a real height.
     fn area_height(&self) -> i32 {
-        self.root()
-            .and_downcast::<gtk::Window>()
-            .map(|w| w.height())
-            .unwrap_or(0)
+        let mut w = self.parent();
+        while let Some(widget) = w {
+            let h = widget.height();
+            if h > 0 {
+                return h;
+            }
+            w = widget.parent();
+        }
+        0
     }
 
     /// Rows that fit in the usable desktop height — the column-wise grid
@@ -738,6 +732,11 @@ impl DesktopIconView {
     fn layout_all(&self) {
         let imp = self.imp();
         let mode = self.settings().borrow().arrange_mode.clone();
+        // Only persist seeded grid positions once the usable area is known —
+        // otherwise a pre-allocation pass (area 0 → single column) would
+        // overwrite the user's saved free-mode layout with bogus positions.
+        let area_known = self.area_height() > 0;
+        debug!("layout_all: mode={} area_known={}", mode, area_known);
         let icons = imp.icons.borrow().clone();
         for (i, item) in icons.iter().enumerate() {
             let pos = if mode == "free" {
