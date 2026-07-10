@@ -747,7 +747,9 @@ impl DesktopIconView {
                     Some(p) => p,
                     None => {
                         let p = self.grid_position(i as i32);
-                        imp.positions.borrow_mut().set(&item.filename(), p.0, p.1);
+                        if area_known {
+                            imp.positions.borrow_mut().set(&item.filename(), p.0, p.1);
+                        }
                         p
                     }
                 }
@@ -760,7 +762,7 @@ impl DesktopIconView {
                 self.move_(item, pos.0 as f64, pos.1 as f64);
             }
         }
-        if mode == "free" {
+        if mode == "free" && area_known {
             imp.positions.borrow().save();
         }
     }
