@@ -234,6 +234,10 @@ mod view_imp {
         // (reposition) drag without depending on fragile DnD content-type
         // negotiation — critical for special items, which carry no file URI.
         pub drag_item: RefCell<Option<IconItem>>,
+        // The currently open context menu. Closed popovers must be
+        // unparented, otherwise they linger in the widget tree holding the
+        // pointer focus and eat right-clicks at the same position.
+        pub menu_popover: RefCell<Option<gtk::PopoverMenu>>,
     }
 
     impl Default for DesktopIconView {
@@ -254,6 +258,7 @@ mod view_imp {
                 drag_group: RefCell::new(None),
                 drop_hl: RefCell::new(None),
                 drag_item: RefCell::new(None),
+                menu_popover: RefCell::new(None),
             }
         }
     }
@@ -907,6 +912,7 @@ impl DesktopIconView {
         item: &IconItem,
     ) {
         self.ensure_keyboard();
+        self.close_menu();
         let button = gesture.current_button();
         if button == gdk::BUTTON_SECONDARY {
             item.imp().click_pending.set(false);
@@ -1145,6 +1151,10 @@ impl DesktopIconView {
                 gdk::Key::v | gdk::Key::V => self.paste_clipboard(),
                 _ => return glib::Propagation::Proceed,
             }
+            return glib::Propagation::Stop;
+        }
+        if keyval == gdk::Key::Escape {
+            self.close_menu();
             return glib::Propagation::Stop;
         }
         let dir = match keyval {
@@ -1436,8 +1446,10 @@ impl DesktopIconView {
         }
         let button = gesture.current_button();
         if button == gdk::BUTTON_PRIMARY {
+            self.close_menu();
             self.select(None);
         } else if button == gdk::BUTTON_SECONDARY {
+            self.close_menu();
             self.select(None);
             self.show_desktop_menu(x, y);
         }
@@ -1669,8 +1681,16 @@ impl DesktopIconView {
     }
 
     fn popup_menu(&self, model: gio::MenuModel, item: Option<&IconItem>, x: f64, y: f64) {
+        if let Some(old) = self.imp().menu_popover.take() {
+            old.unparent();
+        }
+
         let popover = gtk::PopoverMenu::from_model(Some(&model));
         popover.set_has_arrow(false);
+        // No grab: a grabbing xdg_popup on a layer surface without keyboard
+        // focus is dismissed by Hyprland the instant it maps, which ate the
+        // first right-click. Outside clicks close it manually (close_menu).
+        popover.set_autohide(false);
         popover.set_parent(self);
 
         let group = self.build_action_group(item);
@@ -1678,7 +1698,35 @@ impl DesktopIconView {
 
         let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
         popover.set_pointing_to(Some(&rect));
+
+        // Unparent once closed (deferred: "closed" fires mid event
+        // dispatch, when unparenting is unsafe).
+        let view_weak = self.downgrade();
+        popover.connect_closed(move |pop| {
+            let pop = pop.clone();
+            let view_weak = view_weak.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(view) = view_weak.upgrade() {
+                    let imp = view.imp();
+                    let is_current = imp.menu_popover.borrow().as_ref() == Some(&pop);
+                    if is_current {
+                        imp.menu_popover.replace(None);
+                    }
+                }
+                pop.unparent();
+            });
+        });
+
+        self.imp().menu_popover.replace(Some(popover.clone()));
         popover.popup();
+    }
+
+    /// Close the open context menu, if any. Needed because the popover is
+    /// non-autohide (no grab), so outside clicks don't dismiss it.
+    fn close_menu(&self) {
+        if let Some(pop) = self.imp().menu_popover.take() {
+            pop.popdown();
+        }
     }
 
     // ---- settings mutations ----
@@ -2547,17 +2595,74 @@ fn clean_launch_context() -> Option<gdk::AppLaunchContext> {
 /// pointer stays over our desktop layer surface, so with
 /// `focus_follows_mouse` the new toplevel isn't focused until the mouse
 /// moves. Retried — the window isn't mapped immediately after spawn.
+/// Window addresses from `hyprctl clients -j` (one `"address": "0x…"` line
+/// per client). Line-scanned to avoid a JSON dependency.
+fn hypr_client_addresses(clients_json: &str) -> HashSet<String> {
+    clients_json
+        .lines()
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("\"address\": \"")
+                .and_then(|r| r.split('"').next())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn hyprctl_output(args: &[&str]) -> Option<String> {
+    let out = clean_command("hyprctl").args(args).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn hyprctl_dispatch(arg: &str) {
+    let _ = clean_command("hyprctl")
+        .args(["dispatch", "focuswindow", arg])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 fn request_hypr_focus(pid: u32) {
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
         return;
     }
-    for delay_ms in [150u64, 450, 1000] {
+    // Snapshot the windows that exist right now: the launched app's window
+    // often carries a different PID than the process we spawned (flatpak
+    // sandboxes, single-instance file managers, lutris/steam games), so a
+    // window that appears after launch and isn't in this snapshot is our
+    // best fallback target.
+    let before = hyprctl_output(&["clients", "-j"])
+        .map(|s| hypr_client_addresses(&s))
+        .unwrap_or_default();
+
+    // Poll until the window is mapped (slow-starting apps need seconds),
+    // focus it once, then stop — a blind late dispatch would yank focus
+    // from whatever the user switched to meanwhile.
+    let done = Rc::new(Cell::new(false));
+    for delay_ms in [200u64, 500, 1000, 1800, 3000, 5000, 8000, 12000] {
+        let done = done.clone();
+        let before = before.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
-            let _ = clean_command("hyprctl")
-                .args(["dispatch", "focuswindow", &format!("pid:{pid}")])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            if done.get() {
+                return;
+            }
+            let Some(clients) = hyprctl_output(&["clients", "-j"]) else {
+                return;
+            };
+            // Exact PID match first.
+            if clients.contains(&format!("\"pid\": {pid},")) {
+                done.set(true);
+                hyprctl_dispatch(&format!("pid:{pid}"));
+                return;
+            }
+            // Fallback: any window that didn't exist at launch time.
+            if let Some(new_addr) = hypr_client_addresses(&clients)
+                .into_iter()
+                .find(|a| !before.contains(a))
+            {
+                done.set(true);
+                hyprctl_dispatch(&format!("address:{new_addr}"));
+            }
         });
     }
 }

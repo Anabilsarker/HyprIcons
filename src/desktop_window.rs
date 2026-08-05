@@ -40,6 +40,9 @@ impl DesktopWindow {
             .title(&title)
             .decorated(false)
             .build();
+        // Scopes the transparent-background CSS to this window only, so
+        // dialogs keep the theme's normal surface color.
+        window.add_css_class("desktop-window");
 
         // Layer shell — must init before window realized.
         window.init_layer_shell();

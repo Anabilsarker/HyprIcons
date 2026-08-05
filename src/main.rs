@@ -158,7 +158,11 @@ fn setup_logging(debug: bool) {
 }
 
 const CSS: &str = "
-window, scrolledwindow, viewport, flowbox, flowboxchild {
+window.desktop-window,
+window.desktop-window scrolledwindow,
+window.desktop-window viewport,
+window.desktop-window flowbox,
+window.desktop-window flowboxchild {
     background: transparent;
     background-color: transparent;
 }
