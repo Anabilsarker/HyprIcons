@@ -406,28 +406,44 @@ impl DesktopIconView {
         ));
         obj.add_controller(drop_target);
 
-        obj.connect_notify_local(
-            Some("default-width"),
-            glib::clone!(
-                #[weak]
-                obj,
-                move |_, _| obj.maybe_reflow()
-            ),
-        );
+        // default-width/default-height only exist on gtk::Window, not on
+        // this Fixed — connect on the actual top-level window so later real
+        // resizes (monitor resolution/scale change, panel exclusive-zone
+        // change) relayout instead of leaving icons at stale coordinates.
+        if let Some(window) = obj.parent_window() {
+            for prop in ["default-width", "default-height"] {
+                window.connect_notify_local(
+                    Some(prop),
+                    glib::clone!(
+                        #[weak]
+                        obj,
+                        move |_, _| obj.maybe_reflow()
+                    ),
+                );
+            }
+        }
 
         // The first layout in update_icons runs before the window is
-        // allocated (usable area unknown → everything in one column). Once
-        // the frame clock starts and the area is known, relayout once and
-        // stop the callback. size_allocate handles later size changes.
-        obj.add_tick_callback(|view, _clock| {
-            if view.area_height() > 0 {
-                debug!("tick relayout: area_h={}", view.area_height());
-                view.layout_all();
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
+        // allocated (usable area unknown → layout_all() no-ops until then).
+        // Poll on the main-loop idle queue — NOT a frame-clock tick, which
+        // only fires on a pending redraw and in practice made the initial
+        // relayout coincide with the pointer's first hover — so the real
+        // layout lands within a frame of window presentation.
+        glib::idle_add_local(glib::clone!(
+            #[weak]
+            obj,
+            #[upgrade_or]
+            glib::ControlFlow::Break,
+            move || {
+                if obj.area_height() > 0 {
+                    debug!("idle relayout: area_h={}", obj.area_height());
+                    obj.layout_all();
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
             }
-        });
+        ));
 
         // View-level keys: arrow navigation + clipboard (Ctrl+C/X/V).
         let nav = gtk::EventControllerKey::new();
@@ -697,6 +713,19 @@ impl DesktopIconView {
         0
     }
 
+    /// Usable desktop width — same rationale as `area_height()`.
+    fn area_width(&self) -> i32 {
+        let mut w = self.parent();
+        while let Some(widget) = w {
+            let width = widget.width();
+            if width > 0 {
+                return width;
+            }
+            w = widget.parent();
+        }
+        0
+    }
+
     /// Rows that fit in the usable desktop height — the column-wise grid
     /// fills a column top-to-bottom before moving to the next column.
     fn rows(&self) -> i32 {
@@ -731,25 +760,51 @@ impl DesktopIconView {
 
     fn layout_all(&self) {
         let imp = self.imp();
+        // Don't place anything before the usable area is known — otherwise
+        // rows() falls back to a single overflowing column and icons are
+        // visibly put far below the screen. The idle callback in `new()`
+        // calls layout_all() again the moment the area is known.
+        let area_h = self.area_height();
+        if area_h <= 0 {
+            debug!("layout_all: area unknown, deferring");
+            return;
+        }
+        let area_w = self.area_width();
         let mode = self.settings().borrow().arrange_mode.clone();
-        // Only persist seeded grid positions once the usable area is known —
-        // otherwise a pre-allocation pass (area 0 → single column) would
-        // overwrite the user's saved free-mode layout with bogus positions.
-        let area_known = self.area_height() > 0;
-        debug!("layout_all: mode={} area_known={}", mode, area_known);
+        debug!("layout_all: mode={} area={}x{}", mode, area_w, area_h);
+        let icon_size = self.settings().borrow().icon_size;
+        let (cw, ch) = cell_size(icon_size);
+        let max_x = (area_w - cw).max(Self::GRID_MARGIN);
+        let max_y = (area_h - ch).max(Self::GRID_MARGIN);
         let icons = imp.icons.borrow().clone();
+        let mut dirty = false;
         for (i, item) in icons.iter().enumerate() {
             let pos = if mode == "free" {
                 // Bind into a local so the immutable borrow is dropped
                 // before the borrow_mut() below (no double-borrow panic).
                 let existing = imp.positions.borrow().get(&item.filename());
                 match existing {
-                    Some(p) => p,
+                    Some(p) => {
+                        // Clamp against the current usable area so a
+                        // position bad-seeded (or left over from before a
+                        // resize/monitor change) doesn't keep placing the
+                        // icon off-screen forever.
+                        let clamped = (
+                            p.0.clamp(Self::GRID_MARGIN, max_x),
+                            p.1.clamp(Self::GRID_MARGIN, max_y),
+                        );
+                        if clamped != p {
+                            imp.positions
+                                .borrow_mut()
+                                .set(&item.filename(), clamped.0, clamped.1);
+                            dirty = true;
+                        }
+                        clamped
+                    }
                     None => {
                         let p = self.grid_position(i as i32);
-                        if area_known {
-                            imp.positions.borrow_mut().set(&item.filename(), p.0, p.1);
-                        }
+                        imp.positions.borrow_mut().set(&item.filename(), p.0, p.1);
+                        dirty = true;
                         p
                     }
                 }
@@ -762,7 +817,7 @@ impl DesktopIconView {
                 self.move_(item, pos.0 as f64, pos.1 as f64);
             }
         }
-        if mode == "free" && area_known {
+        if mode == "free" && dirty {
             imp.positions.borrow().save();
         }
     }
