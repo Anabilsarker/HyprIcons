@@ -1529,6 +1529,14 @@ impl DesktopIconView {
         ));
         group.add_action(&a_now);
 
+        let paste = gio::SimpleAction::new("paste", None);
+        paste.connect_activate(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_, _| view.paste_clipboard()
+        ));
+        group.add_action(&paste);
+
         if let Some(item) = item {
             let open = gio::SimpleAction::new("open", None);
             open.connect_activate(glib::clone!(
@@ -1539,6 +1547,22 @@ impl DesktopIconView {
                 move |_, _| view.launch_item(&item)
             ));
             group.add_action(&open);
+
+            let copy = gio::SimpleAction::new("copy", None);
+            copy.connect_activate(glib::clone!(
+                #[weak(rename_to = view)]
+                self,
+                move |_, _| view.copy_selection(false)
+            ));
+            group.add_action(&copy);
+
+            let cut = gio::SimpleAction::new("cut", None);
+            cut.connect_activate(glib::clone!(
+                #[weak(rename_to = view)]
+                self,
+                move |_, _| view.copy_selection(true)
+            ));
+            group.add_action(&cut);
 
             let rename = gio::SimpleAction::new("rename", None);
             rename.connect_activate(glib::clone!(
@@ -1597,8 +1621,12 @@ impl DesktopIconView {
     }
 
     fn show_desktop_menu(&self, x: f64, y: f64) {
-        let menu = self.build_sort_section();
-        self.popup_menu(menu.upcast(), None, x, y);
+        let root = gio::Menu::new();
+        let sect = gio::Menu::new();
+        sect.append(Some("Paste"), Some("desktop.paste"));
+        root.append_section(None, &sect);
+        root.append_section(None, &self.build_sort_section());
+        self.popup_menu(root.upcast(), None, x, y);
     }
 
     fn show_item_menu(&self, item: &IconItem, x: f64, y: f64) {
@@ -1620,6 +1648,8 @@ impl DesktopIconView {
                 sect.append(Some("Mount"), Some("desktop.iso-mount"));
             }
         }
+        sect.append(Some("Cut"), Some("desktop.cut"));
+        sect.append(Some("Copy"), Some("desktop.copy"));
         sect.append(Some("Rename"), Some("desktop.rename"));
         sect.append(Some("Delete"), Some("desktop.delete"));
         sect.append(Some("Properties"), Some("desktop.properties"));
